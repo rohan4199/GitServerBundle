@@ -1,0 +1,162 @@
+
+name: Deploy MAS Manage Server Bundles
+
+on:
+  # Auto-deploy when CR or bundle configs change
+  push:
+    paths:
+      - 'deploy/manageworkspace.yaml'
+      - 'server-bundle/**'
+  # Manual trigger with inputs
+  workflow_dispatch:
+    inputs:
+      workspace_name:
+        description: 'ManageWorkspace name (e.g., mas-demo-ws1)'
+        required: true
+      namespace:
+        description: 'OpenShift namespace (defaults to MAS_NAMESPACE secret if omitted)'
+        required: false
+      create_config_secret:
+        description: 'Create/Update Secret for additionalServerConfig? (true/false)'
+        required: false
+        default: 'false'
+      secret_name:
+        description: 'Secret name for additionalServerConfig (optional)'
+        required: false
+      config_file_path:
+        description: 'Path to server-bundle XML to put in the secret (e.g., server-bundle/cron/server-bundle.xml)'
+        required: false
+      set_cron_jvm_opts:
+        description: 'Set JVM options for CRON bundle? (true/false)'
+        required: false
+        default: 'false'
+      cron_jvm_opts:
+        description: 'CRON JVM options (newline-separated, e.g., "-Xms512m\n-Xmx1024m\n-XX:+UseG1GC")'
+        required: false
+      cron_bundle_name:
+        description: 'Name of your CRON bundle in the CR (default: "cron")'
+        required: false
+        default: 'cron'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      # Fallback to secret if namespace input is empty
+      TARGET_NAMESPACE: ${{ github.event.inputs.namespace || secrets.MAS_NAMESPACE }}
+      WORKSPACE_NAME: ${{ github.event.inputs.workspace_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Optional: pin oc version
+      - name: Install oc CLI
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: 'latest'
+
+      - name: Log in to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ secrets.OCP_SERVER_URL }}
+          openshift_token:      ${{ secrets.OCP_TOKEN }}
+          namespace:            ${{ env.TARGET_NAMESPACE }}
+          insecure_skip_tls_verify: true
+
+      - name: Validate namespace exists
+        run: |
+          set -e
+          if ! oc get ns "${{ env.TARGET_NAMESPACE }}" >/dev/null 2>&1; then
+            echo "ERROR: Namespace ${{ env.TARGET_NAMESPACE }} not found."
+            exit 1
+          fi
+
+      # (Optional) Create/Update Secret for additionalServerConfig
+      - name: Create/Update additionalServerConfig Secret
+        if: ${{ github.event.inputs.create_config_secret == 'true' && github.event.inputs.secret_name != '' && github.event.inputs.config_file_path != '' }}
+        run: |
+          set -e
+          NS="${{ env.TARGET_NAMESPACE }}"
+          SECRET="${{ github.event.inputs.secret_name }}"
+          FILE="${{ github.event.inputs.config_file_path }}"
+
+          test -f "$FILE" || { echo "ERROR: File not found: $FILE"; exit 1; }
+
+          # Create or update (idempotent)
+          oc -n "$NS" create secret generic "$SECRET" \
+            --from-file=server-bundle.xml="$FILE" \
+            --dry-run=client -o yaml | oc apply -f -
+
+      # Apply the ManageWorkspace CR that contains the serverBundles definition
+      - name: Apply ManageWorkspace CR (server bundles)
+        run: |
+          set -e
+          NS="${{ env.TARGET_NAMESPACE }}"
+          oc -n "$NS" apply -f deploy/manageworkspace.yaml
+
+      # (Optional) Patch JVM options for the CRON bundle
+      - name: Patch CRON bundle JVM options
+        if: ${{ github.event.inputs.set_cron_jvm_opts == 'true' && github.event.inputs.cron_jvm_opts != '' }}
+        run: |
+          set -e
+          NS="${{ env.TARGET_NAMESPACE }}"
+          WS="${{ env.WORKSPACE_NAME }}"
+          BUNDLE="${{ github.event.inputs.cron_bundle_name }}"
+          JVM_OPTS="${{ github.event.inputs.cron_jvm_opts }}"
+
+          # Escape newlines for JSON
+          JVM_JSON=$(printf "%s" "$JVM_OPTS" | sed ':a;N;$!ba;s/\n/\\n/g')
+
+          # Build a strategic merge patch targeting the named CRON bundle.
+          # NOTE: Patching arrays can be brittle; GitOps via full CR apply is preferred.
+          cat > /tmp/cron-jvm-patch.yaml <<EOF
+          spec:
+            settings:
+              deployment:
+                serverBundles:
+                  - name: ${BUNDLE}
+                    jvmOptions: "${JVM_JSON}"
+          EOF
+
+          oc -n "$NS" patch manageworkspace "$WS" --type=merge --patch-file=/tmp/cron-jvm-patch.yaml
+
+      # Wait for pods to reconcile & become Ready (basic readiness loop)
+      - name: Wait for MAS Manage pods to be Ready
+        run: |
+          set -e
+          NS="${{ env.TARGET_NAMESPACE }}"
+          ATTEMPTS=60
+          SLEEP=20
+
+          echo "Waiting up to $((ATTEMPTS*SLEEP))s for pods in $NS to be Ready..."
+          for i in $(seq 1 $ATTEMPTS); do
+            # Count pods not Ready or not Running
+            NOT_READY=$(oc -n "$NS" get pods -o json | \
+              jq '[.items[] |
+                    {phase: .status.phase,
+                     ready: ([.status.containerStatuses[]?.ready] | all),
+                     name: .metadata.name}
+                   | select(.phase != "Running" or .ready != true)
+                  ] | length')
+            if [ "$NOT_READY" -eq 0 ]; then
+              echo "All pods are Running and Ready."
+              break
+            fi
+            echo "Pods not ready yet... ($NOT_READY remaining) [Attempt $i/$ATTEMPTS]"
+            sleep "$SLEEP"
+          done
+
+          if [ "$NOT_READY" -ne 0 ]; then
+            echo "ERROR: Timeout waiting for pods to become Ready."
+            oc -n "$NS" get pods
+            exit 1
+          fi
+
+      # Output the bundle routes for convenience
+      - name: Show bundle routes
+        run: |
+          NS="${{ env.TARGET_NAMESPACE }}"
+          echo "Routes in $NS:"
+          oc -n "$NS" get route -o wide || true
