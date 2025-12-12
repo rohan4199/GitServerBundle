@@ -24,9 +24,9 @@ jobs:
           
       # (Optional) Switch to a namespace/project
       - name: Set project (namespace)
-        if: ${{ secrets.OPENSHIFT_NAMESPACE != '' }}
+        if: ${{ secrets.TARGET_NAMESPACE != '' }}
         run: |
-          oc project "${{ secrets.OPENSHIFT_NAMESPACE }}"
+          oc project "${{ secrets.TARGET_NAMESPACE }}"
 
       # Verify login and show cluster info
       - name: Verify oc context
@@ -39,4 +39,4 @@ jobs:
       # Example: use oc to list pods in the namespace
       - name: List pods
         run: |
-          oc get pods -n "${{ secrets.OPENSHIFT_NAMESPACE }}"
+          oc get pods -n "${{ secrets.TARGET_NAMESPACE }}"
