@@ -60,7 +60,10 @@ jobs:
       - name: Log in to OpenShift
         uses: redhat-actions/oc-login@v1
         with:
-          oc login --token=sha256~tLL5uSQJDbUPBtRRRg1BxNw9BTzdKlisK_NO4NqA7nE --server=https://api.itz-lwlwr6.pok-lb.techzone.ibm.com:6443
+          openshift_server_url: ${{ secrets.OCP_SERVER_URL }}
+          openshift_token: ${{ secrets.OCP_TOKEN }}
+          namespace: ${{ env.TARGET_NAMESPACE }}
+          insecure_skip_tls_verify: true
 
       - name: Validate namespace exists
         run: |
