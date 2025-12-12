@@ -22,21 +22,4 @@ jobs:
           openshift_server_url: ${{ secrets.OCP_SERVER_URL }}
           openshift_token: ${{ secrets.OCP_TOKEN  }}
           
-      # (Optional) Switch to a namespace/project
-      - name: Set project (namespace)
-        if: ${{ secrets.TARGET_NAMESPACE != '' }}
-        run: |
-          oc project "${{ secrets.TARGET_NAMESPACE }}"
-
-      # Verify login and show cluster info
-      - name: Verify oc context
-        run: |
-          oc whoami
-          oc whoami --show-server
-          oc get projects --no-headers | head -n 10
-          oc get nodes -o wide || true
-
-      # Example: use oc to list pods in the namespace
-      - name: List pods
-        run: |
-          oc get pods -n "${{ secrets.TARGET_NAMESPACE }}"
+    
