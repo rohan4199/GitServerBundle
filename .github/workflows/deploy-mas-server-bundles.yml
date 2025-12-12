@@ -1,6 +1,6 @@
  
 name: Deploy MAS Manage Server Bundles
-
+ 
 on:
   # Auto-deploy when CR or bundle configs change
   push:
